@@ -48,14 +48,19 @@ then
 		exit 1
 	fi
 fi
-#echo "Removing the old writer utility and compiling as a native application"
-#make clean
-#make
+echo "Removing the old writer utility and compiling as a native application"
+make clean
+make
 
-for i in $( seq 1 $NUMFILES)
+for i in $( seq 1 $NUMFILES )
 do
-	./writer.sh "$WRITEDIR/${username}$i.txt" "$WRITESTR"
+	if [ "$assignment" = "assignment1" ]; then
+		./writer.sh "$WRITEDIR/${username}$i.txt" "$WRITESTR"
+	else
+		./writer "$WRITEDIR/${username}$i.txt" "$WRITESTR"
+	fi
 done
+
 
 OUTPUTSTRING=$(./finder.sh "$WRITEDIR" "$WRITESTR")
 
