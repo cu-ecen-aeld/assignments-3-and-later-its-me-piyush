@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script outline to install and build kernel.
 # Author: Siddhant Jajoo.
-
+# Used LLM for this file: https://chatgpt.com/share/697feafb-6660-800d-8fdb-fa6d5a315488
 set -e
 set -u
 
