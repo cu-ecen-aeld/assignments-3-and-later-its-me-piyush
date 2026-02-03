@@ -1,5 +1,11 @@
 #include "systemcalls.h"
 
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <errno.h>
+
 /**
  * @param cmd the command to execute with system()
  * @return true if the command in @param cmd was executed
@@ -16,6 +22,14 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
+    if (cmd == NULL) {
+        return false;
+    }
+
+    int status = system(cmd);
+    if (status == -1) {
+        return false;
+    }
 
     return true;
 }
@@ -36,6 +50,9 @@ bool do_system(const char *cmd)
 
 bool do_exec(int count, ...)
 {
+
+    if (count < 1) return false;
+    
     va_list args;
     va_start(args, count);
     char * command[count+1];
@@ -61,7 +78,31 @@ bool do_exec(int count, ...)
 
     va_end(args);
 
-    return true;
+    if (command[0] == NULL || command[0][0] != '/') {
+        return false;
+    }
+
+    fflush(stdout);
+
+    pid_t pid = fork();
+
+    if (pid < 0 ) {
+        return false;
+    }
+
+    if (pid == 0) {
+        execv(command[0], command);
+        exit(EXIT_FAILURE);
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        return false;
+    }
+
+    return (WIFEXITED(status) && (WEXITSTATUS(status) == 0));
+
+    // return true;
 }
 
 /**
@@ -71,6 +112,11 @@ bool do_exec(int count, ...)
 */
 bool do_exec_redirect(const char *outputfile, int count, ...)
 {
+    
+    if (outputfile == NULL || count < 1) return false;
+
+
+
     va_list args;
     va_start(args, count);
     char * command[count+1];
@@ -95,5 +141,41 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
 
     va_end(args);
 
-    return true;
+    if (command[0] == NULL || command[0][0] != '/') {
+        return false;
+    }
+
+    fflush(stdout);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        return false;
+    }
+
+    if (pid == 0) {
+        // Child: open output file and redirect stdout
+        int fd = open(outputfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) {
+            exit(EXIT_FAILURE);
+        }
+
+        if (dup2(fd, STDOUT_FILENO) < 0) {
+            close(fd);
+            exit(EXIT_FAILURE);
+        }
+
+        close(fd);
+
+        execv(command[0], command);
+        exit(EXIT_FAILURE);
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        return false;
+    }
+
+    return (WIFEXITED(status) && (WEXITSTATUS(status) == 0));
+
+    // return true;
 }
