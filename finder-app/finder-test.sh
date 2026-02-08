@@ -2,77 +2,67 @@
 # Tester script for assignment 1 and assignment 2
 # Author: Siddhant Jajoo
 
+# Finder-test script for Buildroot/QEMU image (Assignment 4)
+# Requirements:
+# - runnable from any directory (no ./ relative calls)
+# - assumes configs at /etc/finder-app/conf
+# - assumes executables/scripts are in PATH
+# - writes finder output to /tmp/assignment4-result.txt
+
 set -e
 set -u
 
-NUMFILES=10
-WRITESTR=AELD_IS_FUN
-WRITEDIR=/tmp/aeld-data
-username=$(cat conf/username.txt)
+CONF_DIR="/etc/finder-app/conf"
 
-if [ $# -lt 3 ]
-then
-	echo "Using default value ${WRITESTR} for string to write"
-	if [ $# -lt 1 ]
-	then
-		echo "Using default value ${NUMFILES} for number of files to write"
-	else
-		NUMFILES=$1
-	fi	
-else
-	NUMFILES=$1
-	WRITESTR=$2
-	WRITEDIR=/tmp/aeld-data/$3
+NUMFILES=10
+WRITESTR="AELD_IS_FUN"
+BASE_WRITEDIR="/tmp/aeld-data"
+
+# Read username from config location required by assignment
+username="$(cat "${CONF_DIR}/assignment.txt")"
+
+# Optional args:
+#   0 args: defaults
+#   1 arg : NUMFILES
+#   2 args: NUMFILES WRITESTR
+#   3 args: NUMFILES WRITESTR SUBDIRNAME (creates /tmp/aeld-data/SUBDIRNAME)
+if [ $# -ge 1 ]; then
+  NUMFILES="$1"
+fi
+if [ $# -ge 2 ]; then
+  WRITESTR="$2"
+fi
+
+WRITEDIR="${BASE_WRITEDIR}"
+if [ $# -ge 3 ]; then
+  WRITEDIR="${BASE_WRITEDIR}/$3"
 fi
 
 MATCHSTR="The number of files are ${NUMFILES} and the number of matching lines are ${NUMFILES}"
 
 echo "Writing ${NUMFILES} files containing string ${WRITESTR} to ${WRITEDIR}"
 
-rm -rf "${WRITEDIR}"
+# Clean and recreate WRITEDIR
+rm -rf "${BASE_WRITEDIR}"
+mkdir -p "${WRITEDIR}"
 
-# create $WRITEDIR if not assignment1
-assignment=`cat ../conf/assignment.txt`
-
-if [ $assignment != 'assignment1' ]
-then
-	mkdir -p "$WRITEDIR"
-
-	#The WRITEDIR is in quotes because if the directory path consists of spaces, then variable substitution will consider it as multiple argument.
-	#The quotes signify that the entire string in WRITEDIR is a single string.
-	#This issue can also be resolved by using double square brackets i.e [[ ]] instead of using quotes.
-	if [ -d "$WRITEDIR" ]
-	then
-		echo "$WRITEDIR created"
-	else
-		exit 1
-	fi
-fi
-# echo "Removing the old writer utility and compiling as a native application"
-# make clean
-# make
-
-for i in $( seq 1 $NUMFILES )
-do
-	if [ "$assignment" = "assignment1" ]; then
-		./writer.sh "$WRITEDIR/${username}$i.txt" "$WRITESTR"
-	else
-		./writer "$WRITEDIR/${username}$i.txt" "$WRITESTR"
-	fi
+# Use writer from PATH (cross-compiled binary in /usr/bin)
+i=1
+while [ "$i" -le "$NUMFILES" ]; do
+  writer "${WRITEDIR}/${username}${i}.txt" "${WRITESTR}"
+  i=$((i + 1))
 done
 
+# Run finder.sh from PATH and capture output
+OUTPUTSTRING="$(finder.sh "${WRITEDIR}" "${WRITESTR}")"
 
-OUTPUTSTRING=$(./finder.sh "$WRITEDIR" "$WRITESTR")
+# Write output to required file
+echo "${OUTPUTSTRING}" > /tmp/assignment4-result.txt
 
-# remove temporary directories
-rm -rf /tmp/aeld-data
+# Cleanup test data directory (leave result file)
+rm -rf "${BASE_WRITEDIR}"
 
-set +e
-echo ${OUTPUTSTRING} | grep "${MATCHSTR}"
-if [ $? -eq 0 ]; then
-	echo "success"
-	exit 0
-else
-	echo "failed: expected  ${MATCHSTR} in ${OUTPUTSTRING} but instead found"
-	exit 1
-fi
+# Validate output
+echo "${OUTPUTSTRING}" | grep -F "${MATCHSTR}" >/dev/null 2>&1
+echo "success"
+exit 0

@@ -1,13 +1,12 @@
-# AESD Assignment 2 - finder-app/Makefile
+# AESD Assignment - finder-app/Makefile (Buildroot-friendly)
 
 TARGET := writer
 SRCS   := writer.c
 OBJS   := $(SRCS:.c=.o)
 
-# If CROSS_COMPILE is not set, this becomes just "gcc"
-CC := $(CROSS_COMPILE)gcc
-
-# Reasonable warnings; feel free to add -Werror after you’re stable
+# Buildroot (and other build systems) will provide CC/CFLAGS via environment.
+# Default to gcc only if not set.
+CC ?= gcc
 CFLAGS ?= -Wall -Wextra -O2 -g
 
 .PHONY: all clean
