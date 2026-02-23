@@ -1,5 +1,6 @@
 // CODE USED FROM - https://beej.us/guide/bgnet/html/#acceptthank-you-for-calling-port-3490
 // Then modified using LLM: https://chatgpt.com/share/69920a0e-e0f4-8002-9ce1-0a8c0bc24621
+// For A6: https://chatgpt.com/share/699bb374-1278-8002-a62c-29da27893841
 
 #define _GNU_SOURCE
 #include <arpa/inet.h>
