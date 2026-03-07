@@ -3,6 +3,7 @@
 // For A6: https://chatgpt.com/share/699bb374-1278-8002-a62c-29da27893841
 
 #define _GNU_SOURCE
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -23,9 +24,18 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef USE_AESD_CHAR_DEVICE
+#define USE_AESD_CHAR_DEVICE 1
+#endif
+
 #define PORT "9000"
-#define DATAFILE "/var/tmp/aesdsocketdata"
 #define BACKLOG 10
+
+#if USE_AESD_CHAR_DEVICE
+#define DATAFILE "/dev/aesdchar"
+#else
+#define DATAFILE "/var/tmp/aesdsocketdata"
+#endif
 
 static volatile sig_atomic_t exit_requested = 0;
 
@@ -42,10 +52,10 @@ struct thread_node {
 SLIST_HEAD(thread_list_head, thread_node);
 static struct thread_list_head g_threads = SLIST_HEAD_INITIALIZER(g_threads);
 
+#if !USE_AESD_CHAR_DEVICE
 static pthread_t g_timestamp_thread;
 static bool g_timestamp_started = false;
-
-/* ===================== SIGNAL HANDLING ===================== */
+#endif
 
 static void signal_handler(int signo)
 {
@@ -58,13 +68,12 @@ static int setup_signals(void)
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = signal_handler;
-    // do NOT set SA_RESTART, we prefer accept/recv to return EINTR sometimes
+
     if (sigaction(SIGINT, &sa, NULL) != 0) return -1;
     if (sigaction(SIGTERM, &sa, NULL) != 0) return -1;
+
     return 0;
 }
-
-/* ===================== SOCKET SETUP ===================== */
 
 static int create_server_socket(void)
 {
@@ -81,17 +90,20 @@ static int create_server_socket(void)
     if (status != 0) return -1;
 
     for (p = res; p != NULL; p = p->ai_next) {
+        int opt = 1;
+
         sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (sockfd < 0) continue;
 
-        int opt = 1;
         if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) != 0) {
             close(sockfd);
             sockfd = -1;
             continue;
         }
 
-        if (bind(sockfd, p->ai_addr, p->ai_addrlen) == 0) break;
+        if (bind(sockfd, p->ai_addr, p->ai_addrlen) == 0) {
+            break;
+        }
 
         close(sockfd);
         sockfd = -1;
@@ -100,6 +112,7 @@ static int create_server_socket(void)
     freeaddrinfo(res);
 
     if (sockfd < 0) return -1;
+
     if (listen(sockfd, BACKLOG) != 0) {
         close(sockfd);
         return -1;
@@ -107,8 +120,6 @@ static int create_server_socket(void)
 
     return sockfd;
 }
-
-/* ===================== DAEMONIZE ===================== */
 
 static int daemonize(void)
 {
@@ -140,11 +151,13 @@ static int daemonize(void)
     return 0;
 }
 
-/* ===================== FILE OPERATIONS (no locking inside) ===================== */
-
 static int append_to_file(const char *buf, size_t len)
 {
+#if USE_AESD_CHAR_DEVICE
+    int fd = open(DATAFILE, O_WRONLY);
+#else
     int fd = open(DATAFILE, O_WRONLY | O_CREAT | O_APPEND, 0644);
+#endif
     if (fd < 0) return -1;
 
     size_t written = 0;
@@ -166,6 +179,11 @@ static int send_full_file(int clientfd)
 {
     int fd = open(DATAFILE, O_RDONLY);
     if (fd < 0) return -1;
+
+    if (lseek(fd, 0, SEEK_SET) < 0) {
+        close(fd);
+        return -1;
+    }
 
     char buffer[4096];
     while (1) {
@@ -192,8 +210,6 @@ static int send_full_file(int clientfd)
     if (close(fd) != 0) return -1;
     return 0;
 }
-
-/* ===================== THREADS ===================== */
 
 struct client_thread_args {
     struct thread_node *node;
@@ -228,6 +244,7 @@ static void *client_thread(void *arg)
         if (!tmp) {
             break;
         }
+
         packet = tmp;
         memcpy(packet + packet_size, buf, (size_t)r);
         packet_size += (size_t)r;
@@ -271,12 +288,12 @@ out:
     return NULL;
 }
 
+#if !USE_AESD_CHAR_DEVICE
 static void *timestamp_thread(void *arg)
 {
     (void)arg;
 
     while (!exit_requested) {
-        // sleep 10s but allow quick exit
         for (int i = 0; i < 10 && !exit_requested; i++) {
             sleep(1);
         }
@@ -287,7 +304,6 @@ static void *timestamp_thread(void *arg)
         localtime_r(&now, &tm_now);
 
         char timestr[128];
-        // RFC 2822-like format
         strftime(timestr, sizeof(timestr), "%a, %d %b %Y %H:%M:%S %z", &tm_now);
 
         char line[256];
@@ -301,8 +317,8 @@ static void *timestamp_thread(void *arg)
 
     return NULL;
 }
+#endif
 
-/* Join and free any completed threads (non-blocking) */
 static void reap_completed_threads(void)
 {
     struct thread_node *cur = SLIST_FIRST(&g_threads);
@@ -312,18 +328,13 @@ static void reap_completed_threads(void)
 
         if (cur->completed) {
             pthread_join(cur->thread, NULL);
-
-            // Portable removal (no SLIST_REMOVE_AFTER required)
             SLIST_REMOVE(&g_threads, cur, thread_node, entries);
-
             free(cur);
         }
 
         cur = next;
     }
 }
-
-/* ===================== MAIN ===================== */
 
 int main(int argc, char *argv[])
 {
@@ -352,12 +363,13 @@ int main(int argc, char *argv[])
         }
     }
 
-    // start timestamp thread (parent/main)
+#if !USE_AESD_CHAR_DEVICE
     if (pthread_create(&g_timestamp_thread, NULL, timestamp_thread, NULL) == 0) {
         g_timestamp_started = true;
     } else {
         syslog(LOG_ERR, "Failed to create timestamp thread");
     }
+#endif
 
     while (!exit_requested) {
         struct sockaddr_in client_addr;
@@ -401,26 +413,22 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        // valgrind-friendly: only reap after starting a new thread
         reap_completed_threads();
     }
 
     syslog(LOG_INFO, "Caught signal, exiting");
 
-    // Stop accepting
     if (g_serverfd >= 0) {
         shutdown(g_serverfd, SHUT_RDWR);
         close(g_serverfd);
         g_serverfd = -1;
     }
 
-    // Help client threads exit quickly
     struct thread_node *n;
     SLIST_FOREACH(n, &g_threads, entries) {
         shutdown(n->clientfd, SHUT_RDWR);
     }
 
-    // Join remaining client threads and free nodes
     while (!SLIST_EMPTY(&g_threads)) {
         struct thread_node *node = SLIST_FIRST(&g_threads);
         SLIST_REMOVE_HEAD(&g_threads, entries);
@@ -428,15 +436,17 @@ int main(int argc, char *argv[])
         free(node);
     }
 
-    // Stop timestamp thread
+#if !USE_AESD_CHAR_DEVICE
     if (g_timestamp_started) {
         pthread_join(g_timestamp_thread, NULL);
     }
+#endif
 
     pthread_mutex_destroy(&file_mutex);
 
-    // Keep previous assignment behavior (usually required)
+#if !USE_AESD_CHAR_DEVICE
     unlink(DATAFILE);
+#endif
 
     closelog();
     return 0;
