@@ -2,23 +2,17 @@
 
 case "$1" in
     start)
-        echo "Loading aesdchar module"
-
-        modprobe aesdchar 2>/dev/null || \
-        insmod /lib/modules/$(uname -r)/extra/aesdchar.ko
+        echo "Loading aesdchar"
+        modprobe aesdchar 2>/dev/null || insmod /lib/modules/$(uname -r)/extra/aesdchar.ko
         ;;
-
     stop)
-        echo "Unloading aesdchar module"
-
+        echo "Unloading aesdchar"
         rmmod aesdchar
         ;;
-
     restart)
         $0 stop
         $0 start
         ;;
-
     *)
         echo "Usage: $0 {start|stop|restart}"
         exit 1
