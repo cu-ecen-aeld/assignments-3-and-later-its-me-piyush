@@ -8,28 +8,34 @@
 #ifndef AESD_CHAR_DRIVER_AESDCHAR_H_
 #define AESD_CHAR_DRIVER_AESDCHAR_H_
 
-#define AESD_DEBUG 1  //Remove comment on this line to enable debug
+#include <linux/cdev.h>
+#include <linux/mutex.h>
+#include "aesd-circular-buffer.h"
 
-#undef PDEBUG             /* undef it, just in case */
+#define AESD_DEBUG 1
+
+#undef PDEBUG
 #ifdef AESD_DEBUG
 #  ifdef __KERNEL__
-     /* This one if debugging is on, and kernel space */
-#    define PDEBUG(fmt, args...) printk( KERN_DEBUG "aesdchar: " fmt, ## args)
+#    define PDEBUG(fmt, args...) printk(KERN_DEBUG "aesdchar: " fmt, ## args)
 #  else
-     /* This one for user space */
 #    define PDEBUG(fmt, args...) fprintf(stderr, fmt, ## args)
 #  endif
 #else
-#  define PDEBUG(fmt, args...) /* not debugging: nothing */
+#  define PDEBUG(fmt, args...)
 #endif
 
 struct aesd_dev
 {
-    /**
-     * TODO: Add structure(s) and locks needed to complete assignment requirements
-     */
-    struct cdev cdev;     /* Char device structure      */
+    struct cdev cdev;                     /* Char device structure */
+
+    struct aesd_circular_buffer buffer;  /* Circular buffer */
+
+    struct mutex lock;                   /* Device mutex */
+
+    char *pending_write_buffer;          /* Buffer for partial writes */
+
+    size_t pending_write_size;           /* Size of pending buffer */
 };
 
-
-#endif /* AESD_CHAR_DRIVER_AESDCHAR_H_ */
+#endif

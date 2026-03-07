@@ -2,9 +2,9 @@
 # Comment/uncomment the following line to disable/enable debugging
 #DEBUG = y
 
-# Add your debugging flag (or not) to CFLAGS
+# Add debugging flag (or not) to CFLAGS
 ifeq ($(DEBUG),y)
-  DEBFLAGS = -O -g -DSCULL_DEBUG # "-O" is needed to expand inlines
+  DEBFLAGS = -O -g -DAESD_DEBUG
 else
   DEBFLAGS = -O2
 endif
@@ -12,19 +12,23 @@ endif
 EXTRA_CFLAGS += $(DEBFLAGS)
 
 ifneq ($(KERNELRELEASE),)
-# call from kernel build system
-obj-m	:= aesdchar.o
+
+# Called from kernel build system
+obj-m := aesdchar.o
 aesdchar-y := aesd-circular-buffer.o main.o
+
 else
 
 KERNELDIR ?= /lib/modules/$(shell uname -r)/build
-PWD       := $(shell pwd)
+PWD := $(shell pwd)
+
+default:
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
 
 modules:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
 
-endif
-
 clean:
-	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c .tmp_versions
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) clean
 
+endif
