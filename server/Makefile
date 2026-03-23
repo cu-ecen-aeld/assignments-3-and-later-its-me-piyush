@@ -1,5 +1,6 @@
 CC ?= $(CROSS_COMPILE)gcc
 CFLAGS ?= -Wall -Werror -Wextra -O0 -g
+CFLAGS += -DUSE_AESD_CHAR_DEVICE=1
 LDFLAGS ?=
 TARGET ?= aesdsocket
 SRC := aesdsocket.c
