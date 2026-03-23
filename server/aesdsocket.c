@@ -1,8 +1,8 @@
 // CODE USED FROM - https://beej.us/guide/bgnet/html/#acceptthank-you-for-calling-port-3490
-// Then modified using LLM: https://chatgpt.com/share/69920a0e-e0f4-8002-9ce1-0a8c0bc24621
-// For A6: https://chatgpt.com/share/699bb374-1278-8002-a62c-29da27893841
+// Then modified using LLM
 
 #define _GNU_SOURCE
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -12,6 +12,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,13 +23,24 @@
 #include <syslog.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
+
+#include "../aesd-char-driver/aesd_ioctl.h"
+
+#ifndef USE_AESD_CHAR_DEVICE
+#define USE_AESD_CHAR_DEVICE 1
+#endif
 
 #define PORT "9000"
-#define DATAFILE "/var/tmp/aesdsocketdata"
 #define BACKLOG 10
 
-static volatile sig_atomic_t exit_requested = 0;
+#if USE_AESD_CHAR_DEVICE
+#define DATAFILE "/dev/aesdchar"
+#else
+#define DATAFILE "/var/tmp/aesdsocketdata"
+#endif
 
+static volatile sig_atomic_t exit_requested = 0;
 static pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_serverfd = -1;
 
@@ -42,10 +54,77 @@ struct thread_node {
 SLIST_HEAD(thread_list_head, thread_node);
 static struct thread_list_head g_threads = SLIST_HEAD_INITIALIZER(g_threads);
 
+#if !USE_AESD_CHAR_DEVICE
 static pthread_t g_timestamp_thread;
 static bool g_timestamp_started = false;
+#endif
 
-/* ===================== SIGNAL HANDLING ===================== */
+/* Parse "AESDCHAR_IOCSEEKTO:X,Y" safely */
+static bool parse_ioctl_command(const char *buf, size_t len, struct aesd_seekto *seekto)
+{
+    const char *prefix = "AESDCHAR_IOCSEEKTO:";
+    size_t prefix_len = strlen(prefix);
+
+    if (!buf || !seekto) return false;
+    if (len <= prefix_len) return false;
+    if (strncmp(buf, prefix, prefix_len) != 0) return false;
+
+    const char *start = buf + prefix_len;
+    const char *end = buf + len;
+    const char *comma = memchr(start, ',', (size_t)(end - start));
+    if (!comma) return false;
+
+    char *cmd_end = NULL;
+    char *off_end = NULL;
+
+    errno = 0;
+    unsigned long cmd = strtoul(start, &cmd_end, 10);
+    if (errno != 0 || cmd_end != comma) return false;
+
+    errno = 0;
+    unsigned long off = strtoul(comma + 1, &off_end, 10);
+    if (errno != 0) return false;
+
+    /* allow optional trailing newline */
+    if (!(off_end == end || (off_end + 1 == end && *off_end == '\n')))
+        return false;
+
+    /* prevent truncation when casting */
+    if (cmd > UINT32_MAX || off > UINT32_MAX)
+        return false;
+
+    seekto->write_cmd = (uint32_t)cmd;
+    seekto->write_cmd_offset = (uint32_t)off;
+
+    return true;
+}
+
+/* send entire contents of fd to client */
+static int send_from_fd(int fd, int clientfd)
+{
+    char buffer[4096];
+
+    while (1) {
+        ssize_t r = read(fd, buffer, sizeof(buffer));
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (r == 0) break;
+
+        ssize_t sent = 0;
+        while (sent < r) {
+            ssize_t s = send(clientfd, buffer + sent, (size_t)(r - sent), 0);
+            if (s < 0) {
+                if (errno == EINTR) continue;
+                return -1;
+            }
+            sent += s;
+        }
+    }
+
+    return 0;
+}
 
 static void signal_handler(int signo)
 {
@@ -58,40 +137,36 @@ static int setup_signals(void)
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = signal_handler;
-    // do NOT set SA_RESTART, we prefer accept/recv to return EINTR sometimes
+
     if (sigaction(SIGINT, &sa, NULL) != 0) return -1;
     if (sigaction(SIGTERM, &sa, NULL) != 0) return -1;
+
     return 0;
 }
-
-/* ===================== SOCKET SETUP ===================== */
 
 static int create_server_socket(void)
 {
     struct addrinfo hints, *res, *p;
     int sockfd = -1;
-    int status;
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
 
-    status = getaddrinfo(NULL, PORT, &hints, &res);
-    if (status != 0) return -1;
+    if (getaddrinfo(NULL, PORT, &hints, &res) != 0)
+        return -1;
 
-    for (p = res; p != NULL; p = p->ai_next) {
+    for (p = res; p; p = p->ai_next) {
+        int opt = 1;
+
         sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (sockfd < 0) continue;
 
-        int opt = 1;
-        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) != 0) {
-            close(sockfd);
-            sockfd = -1;
-            continue;
-        }
+        setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-        if (bind(sockfd, p->ai_addr, p->ai_addrlen) == 0) break;
+        if (bind(sockfd, p->ai_addr, p->ai_addrlen) == 0)
+            break;
 
         close(sockfd);
         sockfd = -1;
@@ -100,6 +175,7 @@ static int create_server_socket(void)
     freeaddrinfo(res);
 
     if (sockfd < 0) return -1;
+
     if (listen(sockfd, BACKLOG) != 0) {
         close(sockfd);
         return -1;
@@ -108,43 +184,13 @@ static int create_server_socket(void)
     return sockfd;
 }
 
-/* ===================== DAEMONIZE ===================== */
-
-static int daemonize(void)
-{
-    pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid > 0) exit(EXIT_SUCCESS);
-
-    if (setsid() < 0) return -1;
-
-    pid = fork();
-    if (pid < 0) return -1;
-    if (pid > 0) exit(EXIT_SUCCESS);
-
-    umask(0);
-
-    if (chdir("/") != 0) return -1;
-
-    int fd = open("/dev/null", O_RDWR);
-    if (fd < 0) return -1;
-
-    if (dup2(fd, STDIN_FILENO) < 0) return -1;
-    if (dup2(fd, STDOUT_FILENO) < 0) return -1;
-    if (dup2(fd, STDERR_FILENO) < 0) return -1;
-
-    if (fd > 2) {
-        if (close(fd) != 0) return -1;
-    }
-
-    return 0;
-}
-
-/* ===================== FILE OPERATIONS (no locking inside) ===================== */
-
 static int append_to_file(const char *buf, size_t len)
 {
+#if USE_AESD_CHAR_DEVICE
+    int fd = open(DATAFILE, O_WRONLY);  /* char device handles its own offsets */
+#else
     int fd = open(DATAFILE, O_WRONLY | O_CREAT | O_APPEND, 0644);
+#endif
     if (fd < 0) return -1;
 
     size_t written = 0;
@@ -158,7 +204,7 @@ static int append_to_file(const char *buf, size_t len)
         written += (size_t)rc;
     }
 
-    if (close(fd) != 0) return -1;
+    close(fd);
     return 0;
 }
 
@@ -167,33 +213,11 @@ static int send_full_file(int clientfd)
     int fd = open(DATAFILE, O_RDONLY);
     if (fd < 0) return -1;
 
-    char buffer[4096];
-    while (1) {
-        ssize_t r = read(fd, buffer, sizeof(buffer));
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            close(fd);
-            return -1;
-        }
-        if (r == 0) break;
-
-        ssize_t sent = 0;
-        while (sent < r) {
-            ssize_t s = send(clientfd, buffer + sent, (size_t)(r - sent), 0);
-            if (s < 0) {
-                if (errno == EINTR) continue;
-                close(fd);
-                return -1;
-            }
-            sent += s;
-        }
-    }
-
-    if (close(fd) != 0) return -1;
-    return 0;
+    lseek(fd, 0, SEEK_SET);
+    int rc = send_from_fd(fd, clientfd);
+    close(fd);
+    return rc;
 }
-
-/* ===================== THREADS ===================== */
 
 struct client_thread_args {
     struct thread_node *node;
@@ -202,14 +226,13 @@ struct client_thread_args {
 
 static void *client_thread(void *arg)
 {
-    struct client_thread_args *args = (struct client_thread_args *)arg;
+    struct client_thread_args *args = arg;
     struct thread_node *node = args->node;
     int clientfd = node->clientfd;
 
-    char ip[INET_ADDRSTRLEN] = {0};
+    char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &args->client_addr.sin_addr, ip, sizeof(ip));
     syslog(LOG_INFO, "Accepted connection from %s", ip);
-
     free(args);
 
     char *packet = NULL;
@@ -218,145 +241,84 @@ static void *client_thread(void *arg)
     while (!exit_requested) {
         char buf[1024];
         ssize_t r = recv(clientfd, buf, sizeof(buf), 0);
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        if (r == 0) break;
+        if (r <= 0) break;
 
-        char *tmp = realloc(packet, packet_size + (size_t)r);
-        if (!tmp) {
-            break;
-        }
+        char *tmp = realloc(packet, packet_size + r);
+        if (!tmp) break;
+
         packet = tmp;
-        memcpy(packet + packet_size, buf, (size_t)r);
-        packet_size += (size_t)r;
+        memcpy(packet + packet_size, buf, r);
+        packet_size += r;
 
         char *newline;
-        while ((newline = memchr(packet, '\n', packet_size)) != NULL) {
-            size_t pkt_len = (size_t)(newline - packet) + 1;
+        while ((newline = memchr(packet, '\n', packet_size))) {
+            size_t pkt_len = newline - packet + 1;
 
-            pthread_mutex_lock(&file_mutex);
-            int wrc = append_to_file(packet, pkt_len);
-            int src = (wrc == 0) ? send_full_file(clientfd) : -1;
-            pthread_mutex_unlock(&file_mutex);
+            struct aesd_seekto seekto;
+            bool is_ioctl = parse_ioctl_command(packet, pkt_len, &seekto);
 
-            if (wrc != 0 || src != 0) {
-                goto out;
-            }
+            if (is_ioctl) {
+                pthread_mutex_lock(&file_mutex);
 
-            size_t remaining = packet_size - pkt_len;
-            memmove(packet, packet + pkt_len, remaining);
-            packet_size = remaining;
+                int devfd = open(DATAFILE, O_RDWR);
+                if (devfd >= 0) {
+                    /* ioctl changes file position inside driver */
+                    ioctl(devfd, AESDCHAR_IOCSEEKTO, &seekto);
+                    send_from_fd(devfd, clientfd);  /* read from that position */
+                    close(devfd);
+                }
 
-            if (packet_size == 0) {
-                free(packet);
-                packet = NULL;
+                pthread_mutex_unlock(&file_mutex);
             } else {
-                char *shrunk = realloc(packet, packet_size);
-                if (shrunk) packet = shrunk;
+                pthread_mutex_lock(&file_mutex);
+                int wrc = append_to_file(packet, pkt_len);
+                int src = (wrc == 0) ? send_full_file(clientfd) : -1;
+                syslog(LOG_ERR, "normal path: pkt_len=%zu wrc=%d src=%d errno=%d", pkt_len, wrc, src, errno);
+                pthread_mutex_unlock(&file_mutex);
+
+                
             }
+
+            memmove(packet, packet + pkt_len, packet_size - pkt_len);
+            packet_size -= pkt_len;
         }
     }
 
-out:
     free(packet);
-
     shutdown(clientfd, SHUT_RDWR);
     close(clientfd);
-
     syslog(LOG_INFO, "Closed connection from %s", ip);
 
     node->completed = true;
     return NULL;
 }
 
-static void *timestamp_thread(void *arg)
-{
-    (void)arg;
-
-    while (!exit_requested) {
-        // sleep 10s but allow quick exit
-        for (int i = 0; i < 10 && !exit_requested; i++) {
-            sleep(1);
-        }
-        if (exit_requested) break;
-
-        time_t now = time(NULL);
-        struct tm tm_now;
-        localtime_r(&now, &tm_now);
-
-        char timestr[128];
-        // RFC 2822-like format
-        strftime(timestr, sizeof(timestr), "%a, %d %b %Y %H:%M:%S %z", &tm_now);
-
-        char line[256];
-        int len = snprintf(line, sizeof(line), "timestamp:%s\n", timestr);
-        if (len < 0) continue;
-
-        pthread_mutex_lock(&file_mutex);
-        (void)append_to_file(line, (size_t)len);
-        pthread_mutex_unlock(&file_mutex);
-    }
-
-    return NULL;
-}
-
-/* Join and free any completed threads (non-blocking) */
-static void reap_completed_threads(void)
-{
-    struct thread_node *cur = SLIST_FIRST(&g_threads);
-
-    while (cur) {
-        struct thread_node *next = SLIST_NEXT(cur, entries);
-
-        if (cur->completed) {
-            pthread_join(cur->thread, NULL);
-
-            // Portable removal (no SLIST_REMOVE_AFTER required)
-            SLIST_REMOVE(&g_threads, cur, thread_node, entries);
-
-            free(cur);
-        }
-
-        cur = next;
-    }
-}
-
-/* ===================== MAIN ===================== */
-
 int main(int argc, char *argv[])
 {
     bool daemon_mode = false;
-    if (argc == 2 && strcmp(argv[1], "-d") == 0) daemon_mode = true;
+    if (argc == 2 && strcmp(argv[1], "-d") == 0)
+        daemon_mode = true;
 
     openlog("aesdsocket", LOG_PID, LOG_USER);
 
-    if (setup_signals() != 0) {
-        syslog(LOG_ERR, "Signal setup failed");
-        return -1;
-    }
+    setup_signals();
 
     g_serverfd = create_server_socket();
-    if (g_serverfd < 0) {
-        syslog(LOG_ERR, "Socket setup failed");
+    if (g_serverfd < 0)
         return -1;
-    }
 
+    /* standard daemonization: fork, detach, drop stdio */
     if (daemon_mode) {
-        if (daemonize() != 0) {
-            syslog(LOG_ERR, "Daemonize failed");
-            close(g_serverfd);
-            g_serverfd = -1;
-            return -1;
-        }
-    }
+        pid_t pid = fork();
+        if (pid < 0) return -1;
+        if (pid > 0) exit(0);
 
-    // start timestamp thread (parent/main)
-    if (pthread_create(&g_timestamp_thread, NULL, timestamp_thread, NULL) == 0) {
-        g_timestamp_started = true;
-    } else {
-        syslog(LOG_ERR, "Failed to create timestamp thread");
+        if (setsid() < 0) return -1;
+        if (chdir("/") != 0) return -1;
+
+        close(STDIN_FILENO);
+        close(STDOUT_FILENO);
+        close(STDERR_FILENO);
     }
 
     while (!exit_requested) {
@@ -364,79 +326,18 @@ int main(int argc, char *argv[])
         socklen_t addrlen = sizeof(client_addr);
 
         int clientfd = accept(g_serverfd, (struct sockaddr *)&client_addr, &addrlen);
-        if (clientfd < 0) {
-            if (errno == EINTR) continue;
-            if (exit_requested) break;
-            syslog(LOG_ERR, "accept failed: %s", strerror(errno));
-            break;
-        }
+        if (clientfd < 0) continue;
 
         struct thread_node *node = calloc(1, sizeof(*node));
-        if (!node) {
-            close(clientfd);
-            continue;
-        }
-
         node->clientfd = clientfd;
-        node->completed = false;
         SLIST_INSERT_HEAD(&g_threads, node, entries);
 
         struct client_thread_args *args = malloc(sizeof(*args));
-        if (!args) {
-            SLIST_REMOVE_HEAD(&g_threads, entries);
-            free(node);
-            close(clientfd);
-            continue;
-        }
-
         args->node = node;
         args->client_addr = client_addr;
 
-        if (pthread_create(&node->thread, NULL, client_thread, args) != 0) {
-            syslog(LOG_ERR, "pthread_create failed");
-            free(args);
-            SLIST_REMOVE_HEAD(&g_threads, entries);
-            free(node);
-            close(clientfd);
-            continue;
-        }
-
-        // valgrind-friendly: only reap after starting a new thread
-        reap_completed_threads();
+        pthread_create(&node->thread, NULL, client_thread, args);
     }
-
-    syslog(LOG_INFO, "Caught signal, exiting");
-
-    // Stop accepting
-    if (g_serverfd >= 0) {
-        shutdown(g_serverfd, SHUT_RDWR);
-        close(g_serverfd);
-        g_serverfd = -1;
-    }
-
-    // Help client threads exit quickly
-    struct thread_node *n;
-    SLIST_FOREACH(n, &g_threads, entries) {
-        shutdown(n->clientfd, SHUT_RDWR);
-    }
-
-    // Join remaining client threads and free nodes
-    while (!SLIST_EMPTY(&g_threads)) {
-        struct thread_node *node = SLIST_FIRST(&g_threads);
-        SLIST_REMOVE_HEAD(&g_threads, entries);
-        pthread_join(node->thread, NULL);
-        free(node);
-    }
-
-    // Stop timestamp thread
-    if (g_timestamp_started) {
-        pthread_join(g_timestamp_thread, NULL);
-    }
-
-    pthread_mutex_destroy(&file_mutex);
-
-    // Keep previous assignment behavior (usually required)
-    unlink(DATAFILE);
 
     closelog();
     return 0;

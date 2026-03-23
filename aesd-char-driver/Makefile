@@ -1,30 +1,37 @@
 # See example Makefile from scull project
 # Comment/uncomment the following line to disable/enable debugging
-#DEBUG = y
+# DEBUG = y
 
-# Add your debugging flag (or not) to CFLAGS
 ifeq ($(DEBUG),y)
-  DEBFLAGS = -O -g -DSCULL_DEBUG # "-O" is needed to expand inlines
+DEBFLAGS = -O -g -DAESD_DEBUG
 else
-  DEBFLAGS = -O2
+DEBFLAGS = -O2
 endif
 
 EXTRA_CFLAGS += $(DEBFLAGS)
 
 ifneq ($(KERNELRELEASE),)
-# call from kernel build system
-obj-m	:= aesdchar.o
+
+# Called from kernel build system
+obj-m := aesdchar.o
 aesdchar-y := aesd-circular-buffer.o main.o
+
 else
 
 KERNELDIR ?= /lib/modules/$(shell uname -r)/build
-PWD       := $(shell pwd)
+KERNEL_SRC ?= $(KERNELDIR)
+PWD := $(shell pwd)
+
+default:
+	$(MAKE) -C $(KERNEL_SRC) M=$(PWD) modules
 
 modules:
-	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
+	$(MAKE) -C $(KERNEL_SRC) M=$(PWD) modules
 
-endif
+modules_install:
+	$(MAKE) -C $(KERNEL_SRC) M=$(PWD) modules_install
 
 clean:
-	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c .tmp_versions
+	$(MAKE) -C $(KERNEL_SRC) M=$(PWD) clean
 
+endif
